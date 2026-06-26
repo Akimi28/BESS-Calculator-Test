@@ -28,7 +28,6 @@ def detect_interval_hours(df):
 def load_and_clean_data(file):
     raw = pd.read_excel(file, header=None)
     raw = raw.dropna(how="all").dropna(axis=1, how="all")
-
     raw_text = raw.astype(str)
 
     header_row = None
@@ -325,9 +324,9 @@ def simulate_target(
                 total_discharge_kwh += energy_used
                 action = "Discharge"
 
-            elif enable_opp_charging and load_kw < target_kw:
-                available_kw = target_kw - load_kw
-                charge_kw = min(available_kw, max_power_kw)
+            elif enable_opp_charging and load_kw < target_kw and soc_kwh < usable_energy_kwh:
+                available_grid_headroom_kw = target_kw - load_kw
+                charge_kw = min(available_grid_headroom_kw, max_power_kw)
 
                 charge_energy = (
                     charge_kw
@@ -335,12 +334,15 @@ def simulate_target(
                     * CHARGE_EFFICIENCY
                 )
 
+                available_battery_space = usable_energy_kwh - soc_kwh
+
+                if charge_energy > available_battery_space:
+                    charge_energy = available_battery_space
+                    charge_kw = charge_energy / interval_hrs / CHARGE_EFFICIENCY
+
                 soc_kwh += charge_energy
-
-                if soc_kwh > usable_energy_kwh:
-                    soc_kwh = usable_energy_kwh
-
                 total_charge_kwh += charge_energy
+                grid_kw_after_bess = load_kw + charge_kw
                 action = "Opportunity Charge"
 
         if soc_kwh < min_soc_kwh:
@@ -484,7 +486,7 @@ def get_daily_diagnostics(
                 soc_kwh -= energy_kwh
                 discharge_energy_kwh += energy_kwh
 
-            elif enable_opp_charging and load_kw < target_kw:
+            elif enable_opp_charging and load_kw < target_kw and soc_kwh < usable_energy_kwh:
                 charge_kw = min(target_kw - load_kw, max_power_kw)
 
                 energy_kwh = (
@@ -493,11 +495,12 @@ def get_daily_diagnostics(
                     * CHARGE_EFFICIENCY
                 )
 
+                available_space = usable_energy_kwh - soc_kwh
+
+                if energy_kwh > available_space:
+                    energy_kwh = available_space
+
                 soc_kwh += energy_kwh
-
-                if soc_kwh > usable_energy_kwh:
-                    soc_kwh = usable_energy_kwh
-
                 charge_energy_kwh += energy_kwh
 
             if soc_kwh < lowest_soc_kwh:
@@ -650,7 +653,7 @@ def run_bess_matrix(
             energy_charged = hardest["Energy Charged (kWh)"]
         else:
             hardest_day = None
-            lowest_soc = None
+            lowest_soc = 100
             energy_used = 0
             energy_charged = 0
 
