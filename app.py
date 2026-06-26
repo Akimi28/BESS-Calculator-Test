@@ -252,6 +252,36 @@ def build_soc_chart(profile_df):
     )
 
 
+def make_run_params(
+    unit_kw,
+    unit_kwh,
+    dod,
+    buffer_pct,
+    max_qty,
+    start_hour,
+    end_hour,
+    enable_opp_charging,
+    capex_per_unit,
+    savings_per_kw,
+    degradation_pct,
+    project_years,
+):
+    return {
+        "unit_kw": float(unit_kw),
+        "unit_kwh": float(unit_kwh),
+        "dod": float(dod),
+        "buffer_pct": float(buffer_pct),
+        "max_qty": int(max_qty),
+        "start_hour": int(start_hour),
+        "end_hour": int(end_hour),
+        "enable_opp_charging": bool(enable_opp_charging),
+        "capex_per_unit": float(capex_per_unit),
+        "savings_per_kw": float(savings_per_kw),
+        "degradation_pct": float(degradation_pct),
+        "project_years": int(project_years),
+    }
+
+
 uploaded_file = st.file_uploader(
     "Upload Load Profile Excel",
     type=["xlsx"],
@@ -333,7 +363,7 @@ st.sidebar.header("Financial Parameters")
 capex_per_unit = st.sidebar.number_input(
     "Capex per Container (RM)",
     min_value=0.0,
-    value=20000.0,
+    value=200000.0,
     step=1000.0,
 )
 
@@ -422,6 +452,28 @@ if uploaded_file:
                     unsafe_allow_html=True,
                 )
 
+        current_params = make_run_params(
+            unit_kw=unit_kw,
+            unit_kwh=unit_kwh,
+            dod=dod,
+            buffer_pct=buffer_pct,
+            max_qty=max_qty,
+            start_hour=start_hour,
+            end_hour=end_hour,
+            enable_opp_charging=enable_opp_charging,
+            capex_per_unit=capex_per_unit,
+            savings_per_kw=savings_per_kw,
+            degradation_pct=degradation_pct,
+            project_years=project_years,
+        )
+
+        if (
+            "results_df" in st.session_state
+            and "run_params" in st.session_state
+            and st.session_state["run_params"] != current_params
+        ):
+            st.warning("Settings changed. Click Run Simulation again to refresh the result.")
+
         if st.button("Run Simulation", type="primary", disabled=end_hour <= start_hour):
             results_df = run_bess_matrix(
                 df=df,
@@ -440,8 +492,13 @@ if uploaded_file:
             )
 
             st.session_state["results_df"] = results_df
+            st.session_state["run_params"] = current_params
 
-        if "results_df" in st.session_state:
+        if (
+            "results_df" in st.session_state
+            and "run_params" in st.session_state
+            and st.session_state["run_params"] == current_params
+        ):
             results_df = st.session_state["results_df"]
 
             best = best_system(results_df)
@@ -471,6 +528,8 @@ if uploaded_file:
                     "ROI (Years)",
                     "Hardest Day",
                     "Lowest SOC (%)",
+                    "Energy Charged (kWh)",
+                    "Opportunity Charging",
                     "Recommendation",
                 ]
             ].copy()
@@ -484,7 +543,7 @@ if uploaded_file:
             )
 
             st.caption(
-                "The buffer percentage is fixed by the user. The formula adjusts the target peak and peak shaved value so the BESS can survive the hardest weekday without dropping below the buffer."
+                "Opportunity charging only changes the result when the battery has already discharged and later has load headroom below the target peak. If the load profile does not dip below the target after discharge, both modes can correctly produce the same result."
             )
 
             st.subheader("Client Proposal Infographic")
