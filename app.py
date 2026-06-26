@@ -7,6 +7,7 @@ from simulation import (
     load_and_clean_data,
     run_bess_matrix,
     best_system,
+    get_monthly_highest_daily_peak,
 )
 
 st.set_page_config(
@@ -20,6 +21,10 @@ uploaded_file = st.file_uploader(
     "Upload Load Profile Excel",
     type=["xlsx"]
 )
+
+# =====================================================
+# SIDEBAR
+# =====================================================
 
 st.sidebar.header("System Parameters")
 
@@ -35,41 +40,58 @@ unit_kwh = st.sidebar.number_input(
 
 dod = st.sidebar.number_input(
     "DoD",
+    min_value=0.0,
+    max_value=1.0,
     value=0.95
 )
 
 buffer_pct = st.sidebar.number_input(
     "Safety Buffer",
+    min_value=0.0,
+    max_value=1.0,
     value=0.10
 )
 
 max_qty = st.sidebar.number_input(
     "Maximum Containers",
+    min_value=1,
     value=5
 )
+
+enable_discharge = st.sidebar.toggle(
+    "Enable Battery Discharge",
+    value=True
+)
+
+# =====================================================
+# FINANCIAL PARAMETERS
+# =====================================================
 
 st.sidebar.header("Financial Parameters")
 
 capex_per_unit = st.sidebar.number_input(
     "Capex per Container (RM)",
-    value=132000
+    value=200000,
+    step=1000
 )
 
 savings_per_kw = st.sidebar.number_input(
-    "Annual Savings per kW Shaved (RM)",
-    value=1164
+    "Peak Shaving Cost per kW (RM/month)",
+    value=97.06
 )
 
 if uploaded_file:
 
-    df = load_and_clean_data(uploaded_file)
+    try:
+        df = load_and_clean_data(uploaded_file)
+    except Exception as e:
+        st.error(f"Failed to load file: {e}")
+        st.stop()
 
     st.success("Load profile imported successfully")
 
-    # =========================
-    # DATA SUMMARY (CLEANER)
-    # =========================
     total_rows = len(df)
+
     start_date = df["timestamp"].min()
     end_date = df["timestamp"].max()
 
@@ -86,14 +108,14 @@ if uploaded_file:
     c1.metric("Total Rows", total_rows)
     c2.metric("Weekdays", weekday_days)
     c3.metric("Weekends", weekend_days)
-    c4.metric("Months", len(df["timestamp"].dt.to_period("M").unique()))
+    c4.metric(
+        "Months",
+        len(df["timestamp"].dt.to_period("M").unique())
+    )
 
     st.write(f"Start Date: {start_date}")
     st.write(f"End Date: {end_date}")
 
-    # =========================
-    # PAGINATION (IMPROVED)
-    # =========================
     st.subheader("📄 Full Data Preview (Paginated)")
 
     preview_df = df.copy()
@@ -117,26 +139,22 @@ if uploaded_file:
         use_container_width=True
     )
 
-    # =========================
-    # CALENDAR (MULTI-MONTH CLEAN)
-    # =========================
     st.subheader("📅 Calendar View (Weekday vs Weekend)")
 
     months = df["timestamp"].dt.to_period("M").unique()
 
     for m in months:
-
         year = m.year
         month = m.month
 
         st.markdown(f"### {calendar.month_name[month]} {year}")
 
         cal = calendar.monthcalendar(year, month)
-
         table = []
 
         for week in cal:
             row = []
+
             for day in week:
                 if day == 0:
                     row.append("")
@@ -150,20 +168,22 @@ if uploaded_file:
 
             table.append(row)
 
-        st.table(pd.DataFrame(
-            table,
-            columns=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        ))
+        st.table(
+            pd.DataFrame(
+                table,
+                columns=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            )
+        )
 
-    st.info("""
-🟩 Weekday → Used for Maximum Demand calculation  
-🟥 Weekend → Ignored in Maximum Demand calculation  
-""")
+    st.info(
+        """
+🟩 Weekday → Used for Maximum Demand calculation
 
-    # =========================
-    # SIMULATION
-    # =========================
-    if st.button("Run Simulation"):
+🟥 Weekend → Ignored in Maximum Demand calculation
+"""
+    )
+
+if st.button("Run Simulation"):
 
         results_df = run_bess_matrix(
             df=df,
@@ -174,23 +194,18 @@ if uploaded_file:
             buffer_pct=buffer_pct,
             capex_per_unit=capex_per_unit,
             savings_per_kw=savings_per_kw,
+            enable_discharge=enable_discharge,
         )
 
-        st.subheader("Simulation Results")
+        st.subheader("📈 Simulation Results")
+        st.dataframe(results_df, use_container_width=True)
 
-        st.dataframe(
-            results_df,
-            use_container_width=True
-        )
-
-        st.subheader("Peak Shaved")
-
+        st.subheader("⚡ Peak Shaved (kW)")
         st.bar_chart(
             results_df.set_index("BESS Qty")["Peak Shaved (kW)"]
         )
 
-        st.subheader("💰 Monthly Savings")
-
+        st.subheader("💰 Monthly Savings (RM)")
         st.bar_chart(
             results_df.set_index("BESS Qty")["Monthly Savings (RM)"]
         )
@@ -207,3 +222,43 @@ if uploaded_file:
             pd.DataFrame([best]),
             use_container_width=True
         )
+
+        st.subheader("🔥 Highest Daily Load per Month (14:00–22:00 window)")
+
+        weekday_monthly = get_monthly_highest_daily_peak(
+            df,
+            day_type="weekday"
+        )
+
+        weekend_monthly = get_monthly_highest_daily_peak(
+            df,
+            day_type="weekend"
+        )
+
+        c_weekday, c_weekend = st.columns(2)
+
+        with c_weekday:
+            st.markdown("**Weekdays**")
+
+            if weekday_monthly.empty:
+                st.info("No weekday data found in the selected window.")
+            else:
+                st.dataframe(
+                    weekday_monthly.round(
+                        {"highest_daily_peak_kw": 1}
+                    ),
+                    use_container_width=True,
+                )
+
+        with c_weekend:
+            st.markdown("**Weekends**")
+
+            if weekend_monthly.empty:
+                st.info("No weekend data found in the selected window.")
+            else:
+                st.dataframe(
+                    weekend_monthly.round(
+                        {"highest_daily_peak_kw": 1}
+                    ),
+                    use_container_width=True,
+                )
