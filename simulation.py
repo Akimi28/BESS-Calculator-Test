@@ -13,16 +13,11 @@ def detect_interval_hours(df):
         return DEFAULT_INTERVAL_HRS
 
     diff = df["timestamp"].sort_values().diff().dropna()
-
     if diff.empty:
         return DEFAULT_INTERVAL_HRS
 
     hours = diff.median().total_seconds() / 3600
-
-    if hours <= 0:
-        return DEFAULT_INTERVAL_HRS
-
-    return hours
+    return hours if hours > 0 else DEFAULT_INTERVAL_HRS
 
 
 def load_and_clean_data(file):
@@ -34,28 +29,15 @@ def load_and_clean_data(file):
 
     for i in range(len(raw_text)):
         row_text = " ".join(raw_text.iloc[i].values).lower()
-
-        has_time = (
-            "date" in row_text
-            or "time" in row_text
-            or "timestamp" in row_text
-        )
-
-        has_load = (
-            "kw" in row_text
-            or "load" in row_text
-            or "demand" in row_text
-            or "power" in row_text
-        )
+        has_time = "date" in row_text or "time" in row_text or "timestamp" in row_text
+        has_load = "kw" in row_text or "load" in row_text or "demand" in row_text or "power" in row_text
 
         if has_time and has_load:
             header_row = i
             break
 
     if header_row is None:
-        raise ValueError(
-            "Cannot detect the header row. Please make sure your Excel has a Date/Time column and a kW/load/demand column."
-        )
+        raise ValueError("Cannot detect header row. Please include Date/Time and Load kW columns.")
 
     df = raw.copy()
     df.columns = df.iloc[header_row].astype(str)
@@ -68,21 +50,11 @@ def load_and_clean_data(file):
     for col in df.columns:
         name = str(col).strip().lower()
 
-        if (
-            "date" in name
-            or "time" in name
-            or "timestamp" in name
-        ):
+        if "date" in name or "time" in name or "timestamp" in name:
             parsed = pd.to_datetime(df[col], errors="coerce")
-            score = parsed.notna().sum()
-            time_candidates.append((score, col))
+            time_candidates.append((parsed.notna().sum(), col))
 
-        if (
-            "kw" in name
-            or "load" in name
-            or "demand" in name
-            or "power" in name
-        ):
+        if "kw" in name or "load" in name or "demand" in name or "power" in name:
             numeric = pd.to_numeric(df[col], errors="coerce")
             valid_count = numeric.notna().sum()
             non_zero_count = numeric[numeric > 0].count()
@@ -97,10 +69,8 @@ def load_and_clean_data(file):
     if not time_candidates:
         for col in df.columns:
             parsed = pd.to_datetime(df[col], errors="coerce")
-            score = parsed.notna().sum()
-
-            if score > 0:
-                time_candidates.append((score, col))
+            if parsed.notna().sum() > 0:
+                time_candidates.append((parsed.notna().sum(), col))
 
     if not load_candidates:
         for col in df.columns:
@@ -139,9 +109,7 @@ def load_and_clean_data(file):
         raise ValueError("No usable timestamp/load data found after cleaning.")
 
     if cleaned["load_kw"].max() <= 0:
-        raise ValueError(
-            "The detected load column contains only zero values. Please check that the Excel load column is labelled with kW, load, demand, or power."
-        )
+        raise ValueError("Detected load column contains only zero values.")
 
     cleaned.attrs["detected_time_column"] = str(time_col)
     cleaned.attrs["detected_load_column"] = str(load_col)
@@ -163,6 +131,15 @@ def get_peak_window_weekdays(df, start_hour=14, end_hour=22):
     return filter_peak_window(weekday_df, start_hour, end_hour)
 
 
+def get_weekday_onpeak_max_load(df, start_hour=14, end_hour=22):
+    peak_df = get_peak_window_weekdays(df, start_hour, end_hour)
+
+    if peak_df.empty:
+        return 0
+
+    return float(peak_df["load_kw"].max())
+
+
 def get_daily_peak_load_by_daytype(df, day_type, start_hour=14, end_hour=22):
     if day_type not in ["weekday", "weekend"]:
         raise ValueError("day_type must be weekday or weekend")
@@ -181,12 +158,7 @@ def get_daily_peak_load_by_daytype(df, day_type, start_hour=14, end_hour=22):
 
     data["date"] = data["timestamp"].dt.date
 
-    daily = (
-        data.groupby("date")["load_kw"]
-        .max()
-        .reset_index()
-    )
-
+    daily = data.groupby("date")["load_kw"].max().reset_index()
     daily.columns = ["date", "daily_peak_kw"]
 
     return daily
@@ -201,36 +173,14 @@ def get_monthly_highest_daily_peak(df, day_type, start_hour=14, end_hour=22):
     )
 
     if daily.empty:
-        return pd.DataFrame(
-            columns=[
-                "month",
-                "date_of_peak",
-                "highest_daily_peak_kw",
-            ]
-        )
+        return pd.DataFrame(columns=["month", "date_of_peak", "highest_daily_peak_kw"])
 
-    daily["month"] = (
-        pd.to_datetime(daily["date"])
-        .dt.to_period("M")
-        .astype(str)
-    )
+    daily["month"] = pd.to_datetime(daily["date"]).dt.to_period("M").astype(str)
 
     idx = daily.groupby("month")["daily_peak_kw"].idxmax()
 
-    monthly = daily.loc[
-        idx,
-        [
-            "month",
-            "date",
-            "daily_peak_kw",
-        ],
-    ].copy()
-
-    monthly.columns = [
-        "month",
-        "date_of_peak",
-        "highest_daily_peak_kw",
-    ]
+    monthly = daily.loc[idx, ["month", "date", "daily_peak_kw"]].copy()
+    monthly.columns = ["month", "date_of_peak", "highest_daily_peak_kw"]
 
     return monthly.sort_values("month").reset_index(drop=True)
 
@@ -328,12 +278,7 @@ def simulate_target(
                 available_grid_headroom_kw = target_kw - load_kw
                 charge_kw = min(available_grid_headroom_kw, max_power_kw)
 
-                charge_energy = (
-                    charge_kw
-                    * interval_hrs
-                    * CHARGE_EFFICIENCY
-                )
-
+                charge_energy = charge_kw * interval_hrs * CHARGE_EFFICIENCY
                 available_battery_space = usable_energy_kwh - soc_kwh
 
                 if charge_energy > available_battery_space:
@@ -488,12 +433,7 @@ def get_daily_diagnostics(
 
             elif enable_opp_charging and load_kw < target_kw and soc_kwh < usable_energy_kwh:
                 charge_kw = min(target_kw - load_kw, max_power_kw)
-
-                energy_kwh = (
-                    charge_kw
-                    * interval_hrs
-                    * CHARGE_EFFICIENCY
-                )
+                energy_kwh = charge_kw * interval_hrs * CHARGE_EFFICIENCY
 
                 available_space = usable_energy_kwh - soc_kwh
 
@@ -583,7 +523,7 @@ def run_bess_matrix(
     max_load = float(peak_df["load_kw"].max())
 
     if max_load <= 0:
-        raise ValueError("Maximum on-peak load is 0 kW. Please check the detected load column.")
+        raise ValueError("Maximum weekday on-peak load is 0 kW.")
 
     results = []
     diagnostics = {}
@@ -616,11 +556,7 @@ def run_bess_matrix(
         capex = qty * capex_per_unit
         monthly_savings = shaved_kw * savings_per_kw
         annual_savings = monthly_savings * 12
-
-        if annual_savings > 0:
-            roi = capex / annual_savings
-        else:
-            roi = 999
+        roi = capex / annual_savings if annual_savings > 0 else 999
 
         daily = get_daily_diagnostics(
             df=df,
@@ -657,10 +593,7 @@ def run_bess_matrix(
             energy_used = 0
             energy_charged = 0
 
-        status = sim["bottleneck_reason"]
-
-        if status is None:
-            status = "Safe"
+        status = sim["bottleneck_reason"] or "Safe"
 
         results.append(
             {
@@ -716,16 +649,8 @@ def best_system(results_df):
         safe_df = results_df.copy()
 
     ranked = safe_df.sort_values(
-        by=[
-            "ROI (Years)",
-            "Peak Shaved (kW)",
-            "Lowest SOC (%)",
-        ],
-        ascending=[
-            True,
-            False,
-            False,
-        ],
+        by=["ROI (Years)", "Peak Shaved (kW)", "Lowest SOC (%)"],
+        ascending=[True, False, False],
     )
 
     return ranked.iloc[0]
