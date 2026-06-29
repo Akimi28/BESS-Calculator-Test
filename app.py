@@ -9,6 +9,7 @@ from simulation import (
     run_bess_matrix,
     best_system,
     get_monthly_highest_daily_peak,
+    get_weekday_onpeak_max_load,
     get_saved_daily_diagnostics,
     get_saved_degradation,
     get_peak_shaving_profile,
@@ -139,7 +140,7 @@ def calendar_html(year, month):
     return html
 
 
-def build_peak_shaving_chart(profile_df):
+def build_peak_shaving_chart(profile_df, start_hour, end_hour):
     if profile_df.empty:
         return None
 
@@ -158,6 +159,26 @@ def build_peak_shaving_chart(profile_df):
             "grid_kw_after_bess": "Grid After BESS",
             "target_kw": "Target Peak",
         }
+    )
+
+    chart_date = chart_df["timestamp"].dt.normalize().iloc[0]
+
+    highlight_df = pd.DataFrame(
+        {
+            "start": [chart_date + pd.Timedelta(hours=start_hour)],
+            "end": [chart_date + pd.Timedelta(hours=end_hour)],
+            "label": [f"On-Peak Window: {hour_label(start_hour)} - {hour_label(end_hour)}"],
+        }
+    )
+
+    highlight = (
+        alt.Chart(highlight_df)
+        .mark_rect(opacity=0.16, color="#f59e0b")
+        .encode(
+            x="start:T",
+            x2="end:T",
+            tooltip=["label:N"],
+        )
     )
 
     long_df = chart_df.melt(
@@ -207,17 +228,16 @@ def build_peak_shaving_chart(profile_df):
                 alt.Tooltip("kW:Q", format=",.1f"),
             ],
         )
-        .properties(height=360)
     )
 
     discharge_df = chart_df[chart_df["Original Load"] > chart_df["Target Peak"]].copy()
 
     if discharge_df.empty:
-        return line
+        return (highlight + line).properties(height=360)
 
-    area = (
+    discharge_area = (
         alt.Chart(discharge_df)
-        .mark_area(opacity=0.25, color="#60a5fa")
+        .mark_area(opacity=0.28, color="#60a5fa")
         .encode(
             x="timestamp:T",
             y="Target Peak:Q",
@@ -225,14 +245,32 @@ def build_peak_shaving_chart(profile_df):
         )
     )
 
-    return area + line
+    return (highlight + discharge_area + line).properties(height=360)
 
 
-def build_soc_chart(profile_df):
+def build_soc_chart(profile_df, start_hour, end_hour):
     if profile_df.empty:
         return None
 
-    return (
+    chart_date = profile_df["timestamp"].dt.normalize().iloc[0]
+
+    highlight_df = pd.DataFrame(
+        {
+            "start": [chart_date + pd.Timedelta(hours=start_hour)],
+            "end": [chart_date + pd.Timedelta(hours=end_hour)],
+        }
+    )
+
+    highlight = (
+        alt.Chart(highlight_df)
+        .mark_rect(opacity=0.16, color="#f59e0b")
+        .encode(
+            x="start:T",
+            x2="end:T",
+        )
+    )
+
+    line = (
         alt.Chart(profile_df)
         .mark_line(color="#22c55e")
         .encode(
@@ -248,8 +286,9 @@ def build_soc_chart(profile_df):
                 alt.Tooltip("action:N", title="Action"),
             ],
         )
-        .properties(height=260)
     )
+
+    return (highlight + line).properties(height=260)
 
 
 def make_run_params(
@@ -407,10 +446,15 @@ if uploaded_file:
         total_rows = len(df)
         start_date = df["timestamp"].min()
         end_date = df["timestamp"].max()
-        max_load = df["load_kw"].max()
 
         weekday_df = df[df["timestamp"].dt.weekday < 5]
         weekend_df = df[df["timestamp"].dt.weekday >= 5]
+
+        weekday_onpeak_max = get_weekday_onpeak_max_load(
+            df,
+            start_hour=start_hour,
+            end_hour=end_hour,
+        )
 
         st.subheader("Load Profile Summary")
 
@@ -420,7 +464,7 @@ if uploaded_file:
         c2.metric("Weekdays", weekday_df["timestamp"].dt.date.nunique())
         c3.metric("Weekends", weekend_df["timestamp"].dt.date.nunique())
         c4.metric("Months", len(df["timestamp"].dt.to_period("M").unique()))
-        c5.metric("Max Load", f"{max_load:,.1f} kW")
+        c5.metric("Highest Weekday On-Peak", f"{weekday_onpeak_max:,.1f} kW")
 
         c6, c7, c8 = st.columns(3)
 
@@ -447,10 +491,7 @@ if uploaded_file:
 
             for m in months:
                 st.markdown(f"### {calendar.month_name[m.month]} {m.year}")
-                st.markdown(
-                    calendar_html(m.year, m.month),
-                    unsafe_allow_html=True,
-                )
+                st.markdown(calendar_html(m.year, m.month), unsafe_allow_html=True)
 
         current_params = make_run_params(
             unit_kw=unit_kw,
@@ -500,7 +541,6 @@ if uploaded_file:
             and st.session_state["run_params"] == current_params
         ):
             results_df = st.session_state["results_df"]
-
             best = best_system(results_df)
 
             st.subheader("Recommended System")
@@ -536,15 +576,7 @@ if uploaded_file:
 
             matrix_view["Hardest Day"] = matrix_view["Hardest Day"].astype(str)
 
-            st.dataframe(
-                matrix_view,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.caption(
-                "Opportunity charging only changes the result when the battery has already discharged and later has load headroom below the target peak. If the load profile does not dip below the target after discharge, both modes can correctly produce the same result."
-            )
+            st.dataframe(matrix_view, use_container_width=True, hide_index=True)
 
             st.subheader("Client Proposal Infographic")
 
@@ -558,9 +590,7 @@ if uploaded_file:
                 format_func=lambda x: f"{x} Unit{'s' if x > 1 else ''}",
             )
 
-            selected_row = results_df[
-                results_df["BESS Qty"] == selected_qty
-            ].iloc[0]
+            selected_row = results_df[results_df["BESS Qty"] == selected_qty].iloc[0]
 
             p1, p2, p3, p4 = st.columns(4)
 
@@ -571,16 +601,27 @@ if uploaded_file:
 
             profile_df = get_peak_shaving_profile(results_df, selected_qty)
 
-            peak_chart = build_peak_shaving_chart(profile_df)
+            peak_chart = build_peak_shaving_chart(
+                profile_df,
+                start_hour=start_hour,
+                end_hour=end_hour,
+            )
 
             if peak_chart is not None:
                 st.altair_chart(peak_chart, use_container_width=True)
+                st.caption(
+                    f"Orange shaded area shows the active peak-shaving window: {hour_label(start_hour)} - {hour_label(end_hour)}."
+                )
             else:
                 st.info("No peak shaving profile available for this scenario.")
 
             st.subheader("Battery SOC and Opportunity Charging")
 
-            soc_chart = build_soc_chart(profile_df)
+            soc_chart = build_soc_chart(
+                profile_df,
+                start_hour=start_hour,
+                end_hour=end_hour,
+            )
 
             if soc_chart is not None:
                 st.altair_chart(soc_chart, use_container_width=True)
@@ -605,12 +646,7 @@ if uploaded_file:
 
             if not degradation_df.empty:
                 st.markdown("### Degradation Projection")
-
-                st.dataframe(
-                    degradation_df,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(degradation_df, use_container_width=True, hide_index=True)
 
                 degradation_chart = (
                     alt.Chart(degradation_df)
@@ -635,11 +671,7 @@ if uploaded_file:
             daily = get_saved_daily_diagnostics(results_df, selected_qty)
 
             if not daily.empty:
-                st.dataframe(
-                    daily,
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                st.dataframe(daily, use_container_width=True, hide_index=True)
 
             st.subheader("Monthly Peak Demand")
 
