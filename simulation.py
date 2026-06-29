@@ -13,34 +13,55 @@ def detect_interval_hours(df):
         return DEFAULT_INTERVAL_HRS
 
     diff = df["timestamp"].sort_values().diff().dropna()
+
     if diff.empty:
         return DEFAULT_INTERVAL_HRS
 
     hours = diff.median().total_seconds() / 3600
-    return hours if hours > 0 else DEFAULT_INTERVAL_HRS
+
+    if hours <= 0:
+        return DEFAULT_INTERVAL_HRS
+
+    return hours
 
 
 def load_and_clean_data(file):
     raw = pd.read_excel(file, header=None)
     raw = raw.dropna(how="all").dropna(axis=1, how="all")
-    raw_text = raw.astype(str)
 
     header_row = None
 
-    for i in range(len(raw_text)):
-        row_text = " ".join(raw_text.iloc[i].values).lower()
-        has_time = "date" in row_text or "time" in row_text or "timestamp" in row_text
-        has_load = "kw" in row_text or "load" in row_text or "demand" in row_text or "power" in row_text
+    for i in range(len(raw)):
+        row_text = " ".join(
+            str(x)
+            for x in raw.iloc[i].values
+            if pd.notna(x)
+        ).lower()
+
+        has_time = (
+            "date" in row_text
+            or "time" in row_text
+            or "timestamp" in row_text
+        )
+
+        has_load = (
+            "kw" in row_text
+            or "load" in row_text
+            or "demand" in row_text
+            or "power" in row_text
+        )
 
         if has_time and has_load:
             header_row = i
             break
 
     if header_row is None:
-        raise ValueError("Cannot detect header row. Please include Date/Time and Load kW columns.")
+        raise ValueError(
+            "Cannot detect header row. Please include Date/Time and Load kW columns."
+        )
 
     df = raw.copy()
-    df.columns = df.iloc[header_row].astype(str)
+    df.columns = [str(x).strip() for x in df.iloc[header_row].values]
     df = df.iloc[header_row + 1:].reset_index(drop=True)
     df = df.dropna(how="all").dropna(axis=1, how="all")
 
@@ -50,12 +71,23 @@ def load_and_clean_data(file):
     for col in df.columns:
         name = str(col).strip().lower()
 
-        if "date" in name or "time" in name or "timestamp" in name:
+        if (
+            "date" in name
+            or "time" in name
+            or "timestamp" in name
+        ):
             parsed = pd.to_datetime(df[col], errors="coerce")
-            time_candidates.append((parsed.notna().sum(), col))
+            score = parsed.notna().sum()
+            time_candidates.append((score, col))
 
-        if "kw" in name or "load" in name or "demand" in name or "power" in name:
+        if (
+            "kw" in name
+            or "load" in name
+            or "demand" in name
+            or "power" in name
+        ):
             numeric = pd.to_numeric(df[col], errors="coerce")
+
             valid_count = numeric.notna().sum()
             non_zero_count = numeric[numeric > 0].count()
             max_value = numeric.max(skipna=True)
@@ -69,12 +101,15 @@ def load_and_clean_data(file):
     if not time_candidates:
         for col in df.columns:
             parsed = pd.to_datetime(df[col], errors="coerce")
-            if parsed.notna().sum() > 0:
-                time_candidates.append((parsed.notna().sum(), col))
+            score = parsed.notna().sum()
+
+            if score > 0:
+                time_candidates.append((score, col))
 
     if not load_candidates:
         for col in df.columns:
             numeric = pd.to_numeric(df[col], errors="coerce")
+
             valid_count = numeric.notna().sum()
             non_zero_count = numeric[numeric > 0].count()
             max_value = numeric.max(skipna=True)
@@ -99,8 +134,15 @@ def load_and_clean_data(file):
     cleaned = df[[time_col, load_col]].copy()
     cleaned.columns = ["timestamp", "load_kw"]
 
-    cleaned["timestamp"] = pd.to_datetime(cleaned["timestamp"], errors="coerce")
-    cleaned["load_kw"] = pd.to_numeric(cleaned["load_kw"], errors="coerce")
+    cleaned["timestamp"] = pd.to_datetime(
+        cleaned["timestamp"],
+        errors="coerce",
+    )
+
+    cleaned["load_kw"] = pd.to_numeric(
+        cleaned["load_kw"],
+        errors="coerce",
+    )
 
     cleaned = cleaned.dropna()
     cleaned = cleaned.sort_values("timestamp").reset_index(drop=True)
@@ -173,14 +215,36 @@ def get_monthly_highest_daily_peak(df, day_type, start_hour=14, end_hour=22):
     )
 
     if daily.empty:
-        return pd.DataFrame(columns=["month", "date_of_peak", "highest_daily_peak_kw"])
+        return pd.DataFrame(
+            columns=[
+                "month",
+                "date_of_peak",
+                "highest_daily_peak_kw",
+            ]
+        )
 
-    daily["month"] = pd.to_datetime(daily["date"]).dt.to_period("M").astype(str)
+    daily["month"] = (
+        pd.to_datetime(daily["date"])
+        .dt.to_period("M")
+        .astype(str)
+    )
 
     idx = daily.groupby("month")["daily_peak_kw"].idxmax()
 
-    monthly = daily.loc[idx, ["month", "date", "daily_peak_kw"]].copy()
-    monthly.columns = ["month", "date_of_peak", "highest_daily_peak_kw"]
+    monthly = daily.loc[
+        idx,
+        [
+            "month",
+            "date",
+            "daily_peak_kw",
+        ],
+    ].copy()
+
+    monthly.columns = [
+        "month",
+        "date_of_peak",
+        "highest_daily_peak_kw",
+    ]
 
     return monthly.sort_values("month").reset_index(drop=True)
 
@@ -278,7 +342,12 @@ def simulate_target(
                 available_grid_headroom_kw = target_kw - load_kw
                 charge_kw = min(available_grid_headroom_kw, max_power_kw)
 
-                charge_energy = charge_kw * interval_hrs * CHARGE_EFFICIENCY
+                charge_energy = (
+                    charge_kw
+                    * interval_hrs
+                    * CHARGE_EFFICIENCY
+                )
+
                 available_battery_space = usable_energy_kwh - soc_kwh
 
                 if charge_energy > available_battery_space:
@@ -433,7 +502,12 @@ def get_daily_diagnostics(
 
             elif enable_opp_charging and load_kw < target_kw and soc_kwh < usable_energy_kwh:
                 charge_kw = min(target_kw - load_kw, max_power_kw)
-                energy_kwh = charge_kw * interval_hrs * CHARGE_EFFICIENCY
+
+                energy_kwh = (
+                    charge_kw
+                    * interval_hrs
+                    * CHARGE_EFFICIENCY
+                )
 
                 available_space = usable_energy_kwh - soc_kwh
 
@@ -556,7 +630,11 @@ def run_bess_matrix(
         capex = qty * capex_per_unit
         monthly_savings = shaved_kw * savings_per_kw
         annual_savings = monthly_savings * 12
-        roi = capex / annual_savings if annual_savings > 0 else 999
+
+        if annual_savings > 0:
+            roi = capex / annual_savings
+        else:
+            roi = 999
 
         daily = get_daily_diagnostics(
             df=df,
@@ -593,7 +671,10 @@ def run_bess_matrix(
             energy_used = 0
             energy_charged = 0
 
-        status = sim["bottleneck_reason"] or "Safe"
+        status = sim["bottleneck_reason"]
+
+        if status is None:
+            status = "Safe"
 
         results.append(
             {
@@ -649,23 +730,34 @@ def best_system(results_df):
         safe_df = results_df.copy()
 
     ranked = safe_df.sort_values(
-        by=["ROI (Years)", "Peak Shaved (kW)", "Lowest SOC (%)"],
-        ascending=[True, False, False],
+        by=[
+            "ROI (Years)",
+            "Peak Shaved (kW)",
+            "Lowest SOC (%)",
+        ],
+        ascending=[
+            True,
+            False,
+            False,
+        ],
     )
 
     return ranked.iloc[0]
 
 
 def get_saved_daily_diagnostics(results_df, qty):
-    return results_df.attrs.get("daily_diagnostics", {}).get(int(qty), pd.DataFrame())
+    diagnostics = results_df.attrs.get("daily_diagnostics", {})
+    return diagnostics.get(int(qty), pd.DataFrame())
 
 
 def get_saved_trace(results_df, qty):
-    return results_df.attrs.get("traces", {}).get(int(qty), pd.DataFrame())
+    traces = results_df.attrs.get("traces", {})
+    return traces.get(int(qty), pd.DataFrame())
 
 
 def get_saved_degradation(results_df, qty):
-    return results_df.attrs.get("degradation", {}).get(int(qty), pd.DataFrame())
+    degradation = results_df.attrs.get("degradation", {})
+    return degradation.get(int(qty), pd.DataFrame())
 
 
 def get_peak_shaving_profile(results_df, qty):
