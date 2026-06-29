@@ -140,9 +140,35 @@ def calendar_html(year, month):
     return html
 
 
+def get_window_times(profile_df, start_hour, end_hour):
+    chart_date = profile_df["timestamp"].dt.normalize().iloc[0]
+    window_start = chart_date + pd.Timedelta(hours=start_hour)
+    window_end = chart_date + pd.Timedelta(hours=end_hour)
+
+    return window_start, window_end
+
+
+def add_window_endpoint(df, window_end):
+    if df.empty:
+        return df
+
+    if df["timestamp"].max() >= window_end:
+        return df
+
+    last_row = df.iloc[-1].copy()
+    last_row["timestamp"] = window_end
+
+    if "interval_end" in last_row:
+        last_row["interval_end"] = window_end
+
+    return pd.concat([df, pd.DataFrame([last_row])], ignore_index=True)
+
+
 def build_peak_shaving_chart(profile_df, start_hour, end_hour):
     if profile_df.empty:
         return None
+
+    window_start, window_end = get_window_times(profile_df, start_hour, end_hour)
 
     chart_df = profile_df[
         [
@@ -161,137 +187,169 @@ def build_peak_shaving_chart(profile_df, start_hour, end_hour):
         }
     )
 
-    chart_date = chart_df["timestamp"].dt.normalize().iloc[0]
+    chart_df = chart_df[
+        (chart_df["timestamp"] >= window_start)
+        & (chart_df["timestamp"] < window_end)
+    ].copy()
 
-    highlight_df = pd.DataFrame(
-        {
-            "start": [chart_date + pd.Timedelta(hours=start_hour)],
-            "end": [chart_date + pd.Timedelta(hours=end_hour)],
-            "label": [f"On-Peak Window: {hour_label(start_hour)} - {hour_label(end_hour)}"],
-        }
+    if chart_df.empty:
+        return None
+
+    interval_minutes = (
+        chart_df["timestamp"]
+        .sort_values()
+        .diff()
+        .dt.total_seconds()
+        .dropna()
+        .median()
+        / 60
     )
 
-    highlight = (
-        alt.Chart(highlight_df)
-        .mark_rect(opacity=0.16, color="#f59e0b")
+    if pd.isna(interval_minutes) or interval_minutes <= 0:
+        interval_minutes = 30
+
+    chart_df["interval_end"] = chart_df["timestamp"] + pd.to_timedelta(
+        interval_minutes,
+        unit="m",
+    )
+
+    chart_df.loc[
+        chart_df["interval_end"] > window_end,
+        "interval_end",
+    ] = window_end
+
+    line_df = add_window_endpoint(chart_df.copy(), window_end)
+
+    shaving_df = chart_df[
+        (chart_df["Original Load"] > chart_df["Target Peak"])
+        & (chart_df["Grid After BESS"] < chart_df["Original Load"])
+    ].copy()
+
+    x_scale = alt.Scale(
+        domain=[
+            window_start.to_pydatetime(),
+            window_end.to_pydatetime(),
+        ]
+    )
+
+    x_axis = alt.Axis(
+        format="%I:%M %p",
+        tickCount=9,
+        labelAngle=0,
+        title="Time",
+    )
+
+    original_line = (
+        alt.Chart(line_df)
+        .mark_line(color="#8A94A6", opacity=0.75, strokeWidth=2)
         .encode(
-            x="start:T",
-            x2="end:T",
-            tooltip=["label:N"],
-        )
-    )
-
-    long_df = chart_df.melt(
-        id_vars=["timestamp"],
-        value_vars=[
-            "Original Load",
-            "Grid After BESS",
-            "Target Peak",
-        ],
-        var_name="Series",
-        value_name="kW",
-    )
-
-    line = (
-        alt.Chart(long_df)
-        .mark_line()
-        .encode(
-            x=alt.X(
-                "timestamp:T",
-                title="Time",
-                axis=alt.Axis(format="%I:%M %p"),
-            ),
-            y=alt.Y("kW:Q", title="Load (kW)"),
-            color=alt.Color(
-                "Series:N",
-                scale=alt.Scale(
-                    domain=[
-                        "Original Load",
-                        "Grid After BESS",
-                        "Target Peak",
-                    ],
-                    range=[
-                        "#93c5fd",
-                        "#22c55e",
-                        "#f97316",
-                    ],
-                ),
-            ),
-            strokeDash=alt.condition(
-                alt.datum.Series == "Target Peak",
-                alt.value([6, 4]),
-                alt.value([0]),
-            ),
+            x=alt.X("timestamp:T", scale=x_scale, axis=x_axis),
+            y=alt.Y("Original Load:Q", title="Load (kW)", scale=alt.Scale(zero=True)),
             tooltip=[
                 alt.Tooltip("timestamp:T", title="Time", format="%I:%M %p"),
-                alt.Tooltip("Series:N"),
-                alt.Tooltip("kW:Q", format=",.1f"),
+                alt.Tooltip("Original Load:Q", title="Original Load", format=",.1f"),
             ],
         )
     )
 
-    discharge_df = chart_df[chart_df["Original Load"] > chart_df["Target Peak"]].copy()
-
-    if discharge_df.empty:
-        return (highlight + line).properties(height=360)
-
-    discharge_area = (
-        alt.Chart(discharge_df)
-        .mark_area(opacity=0.28, color="#60a5fa")
+    bess_line = (
+        alt.Chart(line_df)
+        .mark_line(color="#2DD4BF", strokeWidth=3.5)
         .encode(
-            x="timestamp:T",
-            y="Target Peak:Q",
-            y2="Original Load:Q",
+            x=alt.X("timestamp:T", scale=x_scale, axis=x_axis),
+            y=alt.Y("Grid After BESS:Q", title="Load (kW)", scale=alt.Scale(zero=True)),
+            tooltip=[
+                alt.Tooltip("timestamp:T", title="Time", format="%I:%M %p"),
+                alt.Tooltip("Grid After BESS:Q", title="Grid After BESS", format=",.1f"),
+            ],
         )
     )
 
-    return (highlight + discharge_area + line).properties(height=360)
+    target_line = (
+        alt.Chart(line_df)
+        .mark_line(color="#F59E0B", strokeDash=[8, 5], strokeWidth=2.5)
+        .encode(
+            x=alt.X("timestamp:T", scale=x_scale, axis=x_axis),
+            y=alt.Y("Target Peak:Q", title="Load (kW)", scale=alt.Scale(zero=True)),
+            tooltip=[
+                alt.Tooltip("Target Peak:Q", title="Target Peak", format=",.1f"),
+            ],
+        )
+    )
+
+    if shaving_df.empty:
+        return (original_line + bess_line + target_line).properties(height=420)
+
+    shaved_area = (
+        alt.Chart(shaving_df)
+        .mark_rect(opacity=0.20, color="#38BDF8")
+        .encode(
+            x=alt.X("timestamp:T", scale=x_scale, axis=x_axis),
+            x2=alt.X2("interval_end:T"),
+            y=alt.Y("Grid After BESS:Q", title="Load (kW)", scale=alt.Scale(zero=True)),
+            y2=alt.Y2("Original Load:Q"),
+            tooltip=[
+                alt.Tooltip("timestamp:T", title="Time", format="%I:%M %p"),
+                alt.Tooltip("Original Load:Q", title="Original Load", format=",.1f"),
+                alt.Tooltip("Grid After BESS:Q", title="After BESS", format=",.1f"),
+                alt.Tooltip("Target Peak:Q", title="Target Peak", format=",.1f"),
+            ],
+        )
+    )
+
+    return (shaved_area + original_line + bess_line + target_line).properties(height=420)
 
 
 def build_soc_chart(profile_df, start_hour, end_hour):
     if profile_df.empty:
         return None
 
-    chart_date = profile_df["timestamp"].dt.normalize().iloc[0]
+    window_start, window_end = get_window_times(profile_df, start_hour, end_hour)
 
-    highlight_df = pd.DataFrame(
-        {
-            "start": [chart_date + pd.Timedelta(hours=start_hour)],
-            "end": [chart_date + pd.Timedelta(hours=end_hour)],
-        }
-    )
+    soc_df = profile_df.copy()
 
-    highlight = (
-        alt.Chart(highlight_df)
-        .mark_rect(opacity=0.16, color="#f59e0b")
-        .encode(
-            x="start:T",
-            x2="end:T",
-        )
-    )
+    soc_df = soc_df[
+        (soc_df["timestamp"] >= window_start)
+        & (soc_df["timestamp"] < window_end)
+    ].copy()
 
-    line = (
-        alt.Chart(profile_df)
-        .mark_line(color="#22c55e")
+    if soc_df.empty:
+        return None
+
+    soc_df = add_window_endpoint(soc_df, window_end)
+
+    return (
+        alt.Chart(soc_df)
+        .mark_line(color="#2DD4BF", strokeWidth=3.5)
         .encode(
             x=alt.X(
                 "timestamp:T",
                 title="Time",
-                axis=alt.Axis(format="%I:%M %p"),
+                scale=alt.Scale(
+                    domain=[
+                        window_start.to_pydatetime(),
+                        window_end.to_pydatetime(),
+                    ]
+                ),
+                axis=alt.Axis(format="%I:%M %p", tickCount=9, labelAngle=0),
             ),
-            y=alt.Y("soc_pct:Q", title="Battery SOC (%)"),
+            y=alt.Y(
+                "soc_pct:Q",
+                title="Battery SOC (%)",
+                scale=alt.Scale(domain=[0, 100]),
+            ),
             tooltip=[
                 alt.Tooltip("timestamp:T", title="Time", format="%I:%M %p"),
                 alt.Tooltip("soc_pct:Q", title="SOC (%)", format=",.1f"),
                 alt.Tooltip("action:N", title="Action"),
             ],
         )
+        .properties(height=280)
     )
-
-    return (highlight + line).properties(height=260)
 
 
 def make_run_params(
+    data_key,
     unit_kw,
     unit_kwh,
     dod,
@@ -306,6 +364,7 @@ def make_run_params(
     project_years,
 ):
     return {
+        "data_key": data_key,
         "unit_kw": float(unit_kw),
         "unit_kwh": float(unit_kwh),
         "dod": float(dod),
@@ -447,6 +506,14 @@ if uploaded_file:
         start_date = df["timestamp"].min()
         end_date = df["timestamp"].max()
 
+        data_key = (
+            uploaded_file.name,
+            total_rows,
+            str(start_date),
+            str(end_date),
+            float(df["load_kw"].max()),
+        )
+
         weekday_df = df[df["timestamp"].dt.weekday < 5]
         weekend_df = df[df["timestamp"].dt.weekday >= 5]
 
@@ -494,6 +561,7 @@ if uploaded_file:
                 st.markdown(calendar_html(m.year, m.month), unsafe_allow_html=True)
 
         current_params = make_run_params(
+            data_key=data_key,
             unit_kw=unit_kw,
             unit_kwh=unit_kwh,
             dod=dod,
@@ -513,7 +581,7 @@ if uploaded_file:
             and "run_params" in st.session_state
             and st.session_state["run_params"] != current_params
         ):
-            st.warning("Settings changed. Click Run Simulation again to refresh the result.")
+            st.warning("Settings or uploaded file changed. Click Run Simulation again to refresh the result.")
 
         if st.button("Run Simulation", type="primary", disabled=end_hour <= start_hour):
             results_df = run_bess_matrix(
@@ -607,13 +675,39 @@ if uploaded_file:
                 end_hour=end_hour,
             )
 
-            if peak_chart is not None:
-                st.altair_chart(peak_chart, use_container_width=True)
-                st.caption(
-                    f"Orange shaded area shows the active peak-shaving window: {hour_label(start_hour)} - {hour_label(end_hour)}."
+            chart_col, info_col = st.columns([4.6, 1.2])
+
+            with chart_col:
+                if peak_chart is not None:
+                    st.altair_chart(peak_chart, use_container_width=True)
+                else:
+                    st.warning(
+                        "No chart data available for this scenario. Try another BESS quantity or check whether the hardest day has data inside the selected peak window."
+                    )
+
+            with info_col:
+                st.markdown("### Graph Guide")
+                st.markdown(
+                    """
+                    <div style="line-height:1.9; font-size:15px;">
+                        <div><span style="color:#8A94A6;font-weight:700;">━</span> Original Load</div>
+                        <div><span style="color:#2DD4BF;font-weight:700;">━</span> Grid After BESS</div>
+                        <div><span style="color:#F59E0B;font-weight:700;">- -</span> Target Peak</div>
+                        <div><span style="color:#38BDF8;font-weight:700;">■</span> kW Shaved</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
-            else:
-                st.info("No peak shaving profile available for this scenario.")
+
+                st.divider()
+
+                st.metric("Peak Shaved", f"{selected_row['Peak Shaved (kW)']:,.1f} kW")
+                st.metric("Energy Used", f"{selected_row['Energy Used (kWh)']:,.1f} kWh")
+                st.metric("Lowest SOC", f"{selected_row['Lowest SOC (%)']:,.1f}%")
+
+                st.caption(
+                    f"Chart shows {hour_label(start_hour)} - {hour_label(end_hour)} for the hardest working day."
+                )
 
             st.subheader("Battery SOC and Opportunity Charging")
 
@@ -625,6 +719,8 @@ if uploaded_file:
 
             if soc_chart is not None:
                 st.altair_chart(soc_chart, use_container_width=True)
+            else:
+                st.info("No SOC chart data available for the selected peak window.")
 
             o1, o2, o3, o4 = st.columns(4)
 
