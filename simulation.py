@@ -1,3 +1,4 @@
+import io
 import pandas as pd
 
 CHARGE_EFFICIENCY = 0.90
@@ -9,6 +10,11 @@ def is_weekend(timestamp):
 
 
 def detect_interval_hours(df):
+    forced_interval = df.attrs.get("interval_hours")
+
+    if forced_interval is not None:
+        return float(forced_interval)
+
     if len(df) < 2:
         return DEFAULT_INTERVAL_HRS
 
@@ -155,6 +161,53 @@ def load_and_clean_data(file):
 
     cleaned.attrs["detected_time_column"] = str(time_col)
     cleaned.attrs["detected_load_column"] = str(load_col)
+
+    return cleaned
+
+
+def load_hioki_csv_data(file):
+    content = file.getvalue().decode("utf-8-sig", errors="ignore")
+    lines = content.splitlines()
+
+    header_row = None
+
+    for i, line in enumerate(lines):
+        if line.startswith("Date,Etime,Status"):
+            header_row = i
+            break
+
+    if header_row is None:
+        raise ValueError("Cannot detect HIOKI CSV header row.")
+
+    csv_text = "\n".join(lines[header_row:])
+    raw = pd.read_csv(io.StringIO(csv_text))
+
+    if raw.shape[1] < 26:
+        raise ValueError("HIOKI CSV does not have enough columns. Need Column A and Column Z.")
+
+    timestamp_col = raw.columns[0]
+    load_col = raw.columns[25]
+
+    cleaned = raw[[timestamp_col, load_col]].copy()
+    cleaned.columns = ["timestamp", "load_w"]
+
+    cleaned["timestamp"] = pd.to_datetime(cleaned["timestamp"], errors="coerce")
+    cleaned["load_w"] = pd.to_numeric(cleaned["load_w"], errors="coerce")
+
+    cleaned = cleaned.dropna()
+
+    cleaned["load_kw"] = cleaned["load_w"] / 1000
+    cleaned["load_kw"] = cleaned["load_kw"].clip(lower=0)
+
+    cleaned = cleaned[["timestamp", "load_kw"]]
+    cleaned = cleaned.sort_values("timestamp").reset_index(drop=True)
+
+    if cleaned.empty:
+        raise ValueError("No usable HIOKI data found.")
+
+    cleaned.attrs["detected_time_column"] = "Column A"
+    cleaned.attrs["detected_load_column"] = f"Column Z - {load_col} converted from W to kW"
+    cleaned.attrs["interval_hours"] = 1 / 60
 
     return cleaned
 
