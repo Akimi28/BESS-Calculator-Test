@@ -6,6 +6,7 @@ import altair as alt
 
 from simulation import (
     load_and_clean_data,
+    load_hioki_csv_data,
     run_bess_matrix,
     best_system,
     get_monthly_highest_daily_peak,
@@ -241,7 +242,7 @@ def build_peak_shaving_chart(profile_df, start_hour, end_hour):
 
     original_line = (
         alt.Chart(line_df)
-        .mark_line(color="#8A94A6", opacity=0.75, strokeWidth=2)
+        .mark_line(color="#60A5FA", opacity=0.95, strokeWidth=3)
         .encode(
             x=alt.X("timestamp:T", scale=x_scale, axis=x_axis),
             y=alt.Y("Original Load:Q", title="Load (kW)", scale=alt.Scale(zero=True)),
@@ -282,7 +283,7 @@ def build_peak_shaving_chart(profile_df, start_hour, end_hour):
 
     shaved_area = (
         alt.Chart(shaving_df)
-        .mark_rect(opacity=0.20, color="#38BDF8")
+        .mark_rect(opacity=0.38, color="#2563EB")
         .encode(
             x=alt.X("timestamp:T", scale=x_scale, axis=x_axis),
             x2=alt.X2("interval_end:T"),
@@ -350,6 +351,7 @@ def build_soc_chart(profile_df, start_hour, end_hour):
 
 def make_run_params(
     data_key,
+    calculator_mode,
     unit_kw,
     unit_kwh,
     dod,
@@ -365,6 +367,7 @@ def make_run_params(
 ):
     return {
         "data_key": data_key,
+        "calculator_mode": calculator_mode,
         "unit_kw": float(unit_kw),
         "unit_kwh": float(unit_kwh),
         "dod": float(dod),
@@ -380,10 +383,26 @@ def make_run_params(
     }
 
 
-uploaded_file = st.file_uploader(
-    "Upload Load Profile Excel",
-    type=["xlsx"],
+st.sidebar.header("Calculator Mode")
+
+calculator_mode = st.sidebar.radio(
+    "Select Calculator",
+    [
+        "Proposal Generator",
+        "HIOKI CSV Calculator",
+    ],
 )
+
+if calculator_mode == "Proposal Generator":
+    uploaded_file = st.file_uploader(
+        "Upload Load Profile Excel",
+        type=["xlsx"],
+    )
+else:
+    uploaded_file = st.file_uploader(
+        "Upload HIOKI CSV File",
+        type=["csv"],
+    )
 
 
 st.sidebar.header("System Parameters")
@@ -491,7 +510,10 @@ project_years = st.sidebar.number_input(
 
 if uploaded_file:
     try:
-        df = load_and_clean_data(uploaded_file)
+        if calculator_mode == "Proposal Generator":
+            df = load_and_clean_data(uploaded_file)
+        else:
+            df = load_hioki_csv_data(uploaded_file)
 
         st.success("Load profile imported successfully")
 
@@ -508,6 +530,7 @@ if uploaded_file:
 
         data_key = (
             uploaded_file.name,
+            calculator_mode,
             total_rows,
             str(start_date),
             str(end_date),
@@ -562,6 +585,7 @@ if uploaded_file:
 
         current_params = make_run_params(
             data_key=data_key,
+            calculator_mode=calculator_mode,
             unit_kw=unit_kw,
             unit_kwh=unit_kwh,
             dod=dod,
@@ -690,10 +714,10 @@ if uploaded_file:
                 st.markdown(
                     """
                     <div style="line-height:1.9; font-size:15px;">
-                        <div><span style="color:#8A94A6;font-weight:700;">━</span> Original Load</div>
-                        <div><span style="color:#2DD4BF;font-weight:700;">━</span> Grid After BESS</div>
-                        <div><span style="color:#F59E0B;font-weight:700;">- -</span> Target Peak</div>
-                        <div><span style="color:#38BDF8;font-weight:700;">■</span> kW Shaved</div>
+                        <div><span style="color:#60A5FA;font-weight:700;">LINE</span> Original Load</div>
+                        <div><span style="color:#2DD4BF;font-weight:700;">LINE</span> Grid After BESS</div>
+                        <div><span style="color:#F59E0B;font-weight:700;">DASH</span> Target Peak</div>
+                        <div><span style="color:#2563EB;font-weight:700;">BLOCK</span> kW Shaved</div>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -799,4 +823,4 @@ if uploaded_file:
         st.error(str(e))
 
 else:
-    st.info("Upload an Excel load profile to begin.")
+    st.info("Upload a file to begin.")
