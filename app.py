@@ -472,7 +472,7 @@ st.sidebar.header("Operation Mode")
 
 enable_opp_charging = st.sidebar.toggle(
     "Enable Opportunity Charging",
-    value=True,
+    value=False,
 )
 
 st.sidebar.header("Financial Parameters")
@@ -480,7 +480,7 @@ st.sidebar.header("Financial Parameters")
 capex_per_unit = st.sidebar.number_input(
     "Capex per Container (RM)",
     min_value=0.0,
-    value=200000.0,
+    value=210000.0,
     step=1000.0,
 )
 
